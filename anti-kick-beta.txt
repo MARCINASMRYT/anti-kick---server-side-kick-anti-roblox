@@ -1,136 +1,247 @@
--- [[ ZAAWANSOWANY SYSTEM ANTI-KICK & SMART SERVER HOP ]] --
+-- [[ ZAAWANSOWANY SYSTEM ANTI-KICK & SMART SERVER HOP (FIXED) ]] --
 if not game:IsLoaded() then game.Loaded:Wait() end
 
-local Players = game:GetService("Players")
-local TeleportService = game:GetService("TeleportService")
-local HttpService = game:GetService("HttpService")
-local GuiService = game:GetService("GuiService")
-local NetworkClient = game:GetService("NetworkClient")
-local CoreGui = game:GetService("CoreGui")
+local Players          = game:GetService("Players")
+local TeleportService  = game:GetService("TeleportService")
+local HttpService      = game:GetService("HttpService")
+local GuiService       = game:GetService("GuiService")
+local CoreGui          = game:GetService("CoreGui")
+local StarterGui       = game:GetService("StarterGui")
 
-local LocalPlayer = Players.LocalPlayer
-local PlaceId = game.PlaceId
+local LocalPlayer  = Players.LocalPlayer
+local PlaceId      = game.PlaceId
 local CurrentJobId = game.JobId
 
--- Ustawienia
+-- [[ BEZPIECZNE POBRANIE FUNKCJI EXECUTORA (z fallbackami) ]] --
+-- Dzieki temu skrypt nie wybucha na starcie, jesli executor czegos nie ma.
+local httprequest     = (syn and syn.request) or (http and http.request) or http_request or (fluxus and fluxus.request) or request
+local newcclosure     = newcclosure or function(f) return f end
+local hookmetamethod  = hookmetamethod
+local getnamecallmethod = getnamecallmethod
+local getrawmetatable = getrawmetatable
+local setreadonly     = setreadonly
+local checkcaller     = checkcaller or function() return false end
+local queueteleport   = (syn and syn.queue_on_teleport) or queue_on_teleport or (fluxus and fluxus.queue_on_teleport)
+
+-- [[ USTAWIENIA ]] --
+local SCRIPT_URL = "" -- (OPCJONALNIE) raw link do tego skryptu. Jesli ustawisz, anti-kick wznowi sie po teleporcie.
 local isTeleporting = false
 local attemptsOnSameServer = 0
-local MAX_SAME_SERVER_ATTEMPTS = 1 -- Ile razy ma próbować wejść na ten sam serwer przed zmianą?
+local MAX_SAME_SERVER_ATTEMPTS = 1 -- Ile razy probowac wejsc na ten sam serwer przed zmiana?
 
--- [[ FUNKCJA SZUKANIA NOWEGO SERWERA (SERVER HOP) ]]
-local function ServerHop()
-    print("[Smart Hop] Szukam zupełnie nowego serwera...")
-    
-    -- Wykrywanie uniwersalnej funkcji HTTP executora
-    local httprequest = (syn and syn.request) or (http and http.request) or http_request or (fluxus and fluxus.request) or request
-    
-    if httprequest then
-        -- Pobieramy listę serwerów z API Robloxa
-        local api_url = "https://games.roblox.com/v1/games/" .. PlaceId .. "/servers/Public?sortOrder=Desc&limit=100"
-        local success, result = pcall(function()
-            return httprequest({
-                Url = api_url,
-                Method = "GET"
-            })
-        end)
-
-        if success and result.StatusCode == 200 then
-            local decoded = HttpService:JSONDecode(result.Body)
-            local availableServers = {}
-
-            -- Filtrowanie serwerów
-            for _, server in ipairs(decoded.data) do
-                -- Ignorujemy pełne serwery oraz ten, z którego właśnie dostaliśmy kicka
-                if server.playing < server.maxPlayers and server.id ~= CurrentJobId then
-                    table.insert(availableServers, server.id)
-                end
-            end
-
-            if #availableServers > 0 then
-                -- Losujemy nowy serwer z listy, aby uniknąć wejścia na serwer znajomego itp.
-                local randomJobId = availableServers[math.random(1, #availableServers)]
-                print("[Smart Hop] Znaleziono nowy serwer! JobId: " .. randomJobId)
-                TeleportService:TeleportToPlaceInstance(PlaceId, randomJobId, LocalPlayer)
-                return
-            end
-        end
+-- Pomocnik: bezpieczne podlaczanie eventow (jeden zly event nie zabije calego skryptu)
+local function safeConnect(signal, callback)
+    local ok, conn = pcall(function()
+        return signal:Connect(newcclosure(callback))
+    end)
+    if not ok then
+        warn("[Anti-Kick] Nie udalo sie podpiac eventu (pomijam): " .. tostring(conn))
     end
-    
-    -- FALLBACK: Jeśli executor zablokuje zapytanie HTTP, używamy czystego teleportu w ciemno
-    print("[Smart Hop] HTTP zablokowane. Wykonuję ślepy skok na inny serwer...")
-    TeleportService:Teleport(PlaceId, LocalPlayer)
 end
 
--- [[ GŁÓWNA LOGIKA REJOINA ]]
+-- Pomocnik: powiadomienie na ekranie (uniwersalne - dziala na Madium i innych)
+local function notify(title, text, duration)
+    task.spawn(function()
+        -- SetCore tuz po wczytaniu gry bywa jeszcze nie gotowy - dajemy kilka prob
+        for _ = 1, 5 do
+            local ok = pcall(function()
+                StarterGui:SetCore("SendNotification", {
+                    Title    = title or "Anti-Kick",
+                    Text     = text or "",
+                    Duration = duration or 5,
+                })
+            end)
+            if ok then return end
+            task.wait(0.5)
+        end
+        -- Fallback: natywne powiadomienie executora, jesli istnieje
+        pcall(function()
+            local fn = (Madium and Madium.notify) or (identifyexecutor and rconsoleprint)
+            if typeof(fn) == "function" then fn(tostring(title) .. ": " .. tostring(text)) end
+        end)
+    end)
+end
+
+-- Pomocnik: utrzymanie skryptu po teleporcie (server hopie)
+local function persistAcrossTeleport()
+    if queueteleport and SCRIPT_URL ~= "" then
+        pcall(function()
+            queueteleport('loadstring(game:HttpGet("' .. SCRIPT_URL .. '"))()')
+        end)
+    end
+end
+
+-- [[ FUNKCJA SZUKANIA NOWEGO SERWERA (SERVER HOP) ]] --
+local function ServerHop()
+    print("[Smart Hop] Szukam zupelnie nowego serwera...")
+    persistAcrossTeleport()
+
+    if httprequest then
+        local cursor = ""
+        local availableServers = {}
+
+        -- Przechodzimy po stronach (paginacja), zeby miec wiekszy wybor serwerow
+        for _ = 1, 3 do
+            local api_url = "https://games.roblox.com/v1/games/" .. PlaceId
+                .. "/servers/Public?sortOrder=Desc&limit=100" .. (cursor ~= "" and ("&cursor=" .. cursor) or "")
+
+            local success, result = pcall(function()
+                return httprequest({ Url = api_url, Method = "GET" })
+            end)
+
+            -- Rozne executory zwracaja StatusCode lub Status
+            local code = success and result and (result.StatusCode or result.Status)
+            local body = success and result and result.Body
+
+            if code == 200 and body then
+                local ok, decoded = pcall(function() return HttpService:JSONDecode(body) end)
+                if ok and decoded and decoded.data then
+                    for _, server in ipairs(decoded.data) do
+                        -- Pomijamy pelne serwery oraz ten, z ktorego dostalismy kicka
+                        if server.playing and server.maxPlayers
+                            and server.playing < server.maxPlayers
+                            and server.id ~= CurrentJobId then
+                            table.insert(availableServers, server.id)
+                        end
+                    end
+                    cursor = decoded.nextPageCursor or ""
+                    if cursor == "" then break end
+                else
+                    break
+                end
+            else
+                break
+            end
+        end
+
+        if #availableServers > 0 then
+            local randomJobId = availableServers[math.random(1, #availableServers)]
+            print("[Smart Hop] Znaleziono nowy serwer! JobId: " .. randomJobId)
+            notify("Anti-Kick", "Server Hop -> nowy serwer", 4)
+            pcall(function()
+                TeleportService:TeleportToPlaceInstance(PlaceId, randomJobId, LocalPlayer)
+            end)
+            return
+        end
+    end
+
+    -- FALLBACK: brak HTTP albo brak serwerow -> slepy skok
+    print("[Smart Hop] Brak listy serwerow / HTTP zablokowane. Slepy skok na inny serwer...")
+    notify("Anti-Kick", "Slepy skok na inny serwer...", 4)
+    pcall(function()
+        TeleportService:Teleport(PlaceId, LocalPlayer)
+    end)
+end
+
+-- [[ GLOWNA LOGIKA REJOINA ]] --
 local function executeEvacuation()
     if isTeleporting then return end
     isTeleporting = true
-    
-    print("[Anti-Kick] Wykryto zagrożenie. Analiza opcji ucieczki...")
-    
+
+    print("[Anti-Kick] Wykryto zagrozenie. Analiza opcji ucieczki...")
+    notify("Anti-Kick", "Wykryto kick - ewakuacja!", 4)
+
     if attemptsOnSameServer < MAX_SAME_SERVER_ATTEMPTS then
         attemptsOnSameServer = attemptsOnSameServer + 1
-        print("[Anti-Kick] Próba " .. attemptsOnSameServer .. ": Powrót na ten sam serwer...")
-        TeleportService:TeleportToPlaceInstance(PlaceId, CurrentJobId, LocalPlayer)
+        print("[Anti-Kick] Proba " .. attemptsOnSameServer .. ": Powrot na ten sam serwer...")
+        persistAcrossTeleport()
+        pcall(function()
+            TeleportService:TeleportToPlaceInstance(PlaceId, CurrentJobId, LocalPlayer)
+        end)
     else
-        print("[Anti-Kick] Ten sam serwer zawiódł lub jest spalony. Uruchamiam Server Hop...")
+        print("[Anti-Kick] Ten sam serwer spalony. Uruchamiam Server Hop...")
         ServerHop()
     end
-    
-    -- Odblokowanie blokady teleportacji po czasie (gdyby teleport się zawiesił)
+
+    -- Odblokowanie blokady, gdyby teleport sie zawiesil
     task.delay(10, function() isTeleporting = false end)
 end
 
--- [[ WYKRYWANIE PORAŻKI TELEPORTACJI ]]
-TeleportService.TeleportInitFailed:Connect(newcclosure(function(player, teleportResult, errorMessage)
-    print("[System] Błąd łączenia: " .. tostring(errorMessage))
+-- [[ WYKRYWANIE PORAZKI TELEPORTACJI ]] --
+safeConnect(TeleportService.TeleportInitFailed, function(player, teleportResult, errorMessage)
+    print("[System] Blad teleportu: " .. tostring(errorMessage))
     isTeleporting = false
-    -- Jeśli wyrzuci błąd, natychmiast wymuszamy skok na INNY serwer
-    attemptsOnSameServer = 999 
+    attemptsOnSameServer = 999 -- wymuszamy skok na INNY serwer
     task.wait(1)
     executeEvacuation()
-end))
+end)
 
--- [[ WARSTWY DETEKCJI (GŁĘBOKIE MONOTOROWANIE) ]]
+-- [[ WARSTWY DETEKCJI ]] --
 
--- 1. Utrata połączenia sieciowego
-NetworkClient.ConnectionLost:Connect(newcclosure(function()
-    executeEvacuation()
-end))
-
--- 2. Komunikaty GuiService
-GuiService.ErrorMessageChanged:Connect(newcclosure(function()
+-- 1. Komunikaty bledu GuiService (najpewniejszy sygnal kicka po stronie klienta)
+safeConnect(GuiService.ErrorMessageChanged, function()
     task.wait(0.1)
     executeEvacuation()
-end))
+end)
 
--- 3. Detekcja z ukrytego CoreGui
-task.spawn(function()
-    local promptOverlay = CoreGui:WaitForChild("RobloxPromptGui", 10)
-    if promptOverlay then
-        promptOverlay = promptOverlay:WaitForChild("promptOverlay", 10)
-        if promptOverlay then
-            promptOverlay.ChildAdded:Connect(newcclosure(function(child)
-                if child.Name == "ErrorPrompt" then executeEvacuation() end
-            end))
+-- 2. Utrata polaczenia sieciowego (jesli executor/Roblox udostepnia ten event)
+do
+    local NetworkClient = game:FindService and game:FindService("NetworkClient")
+    if NetworkClient then
+        -- Probujemy roznych nazw eventow - kazda w pcall, bo nie kazda istnieje
+        for _, eventName in ipairs({ "ConnectionLost", "ConnectionFailed", "ConnectionRejected" }) do
+            pcall(function()
+                if NetworkClient[eventName] then
+                    safeConnect(NetworkClient[eventName], function()
+                        executeEvacuation()
+                    end)
+                end
+            end)
         end
     end
+end
+
+-- 3. Detekcja z ukrytego CoreGui (ErrorPrompt)
+task.spawn(function()
+    local ok = pcall(function()
+        local promptGui = CoreGui:WaitForChild("RobloxPromptGui", 10)
+        if not promptGui then return end
+        local overlay = promptGui:WaitForChild("promptOverlay", 10)
+        if not overlay then return end
+        safeConnect(overlay.ChildAdded, function(child)
+            if child.Name == "ErrorPrompt" then
+                executeEvacuation()
+            end
+        end)
+    end)
+    if not ok then warn("[Anti-Kick] Detekcja CoreGui niedostepna.") end
 end)
 
--- 4. Hook na metatabelę (Blokowanie lokalnego Kicka i ciche przełączenie)
-local mt = getrawmetatable(game)
-local oldNamecall = mt.__namecall
-setreadonly(mt, false)
+-- 4. Hook na __namecall (blokowanie LOKALNEGO Player:Kick() i cicha ewakuacja)
+do
+    if getnamecallmethod then
+        local oldNamecall
+        local handler = function(self, ...)
+            local method = getnamecallmethod()
+            if method == "Kick" and self == LocalPlayer and not checkcaller() then
+                print("[Anti-Kick] Przechwycono lokalny Kick! Ewakuacja.")
+                task.spawn(executeEvacuation)
+                return nil
+            end
+            return oldNamecall(self, ...)
+        end
 
-mt.__namecall = newcclosure(function(self, ...)
-    local method = getnamecallmethod()
-    if tostring(method) == "Kick" and self == LocalPlayer then
-        print("[Anti-Kick] Przechwycono próbę lokalnego wyrzucenia! Wykonuję ewakuację.")
-        task.spawn(executeEvacuation)
-        return nil
+        local hooked = false
+        if hookmetamethod then
+            local ok = pcall(function()
+                oldNamecall = hookmetamethod(game, "__namecall", newcclosure(handler))
+            end)
+            hooked = ok
+        end
+
+        if not hooked and getrawmetatable and setreadonly then
+            pcall(function()
+                local mt = getrawmetatable(game)
+                oldNamecall = mt.__namecall
+                setreadonly(mt, false)
+                mt.__namecall = newcclosure(handler)
+                setreadonly(mt, true)
+            end)
+        end
+    else
+        warn("[Anti-Kick] Brak getnamecallmethod - hook anty-Kick pominiety.")
     end
-    return oldNamecall(self, ...)
-end)
-setreadonly(mt, true)
+end
 
-print("[✓] Moduł Anti-Kick + Smart Server Hop aktywowany.")
+print("[OK] Modul Anti-Kick + Smart Server Hop aktywowany.")
+notify("Anti-Kick", "Skrypt aktywny i chroni Cie! ✓", 5)
