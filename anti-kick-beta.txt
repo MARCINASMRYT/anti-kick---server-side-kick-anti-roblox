@@ -24,7 +24,9 @@ local checkcaller     = checkcaller or function() return false end
 local queueteleport   = (syn and syn.queue_on_teleport) or queue_on_teleport or (fluxus and fluxus.queue_on_teleport)
 
 -- [[ USTAWIENIA ]] --
-local SCRIPT_URL = "" -- (OPCJONALNIE) raw link do tego skryptu. Jesli ustawisz, anti-kick wznowi sie po teleporcie.
+-- (OPCJONALNIE) raw link do tego skryptu. Dziala TYLKO gdy repo jest PUBLICZNE.
+-- NIE wklejaj tu linku z "?token=..." - taki token wygasa po kilku minutach!
+local SCRIPT_URL = "https://raw.githubusercontent.com/MARCINASMRYT/anti-kick---server-side-kick-anti-roblox/main/anti-kick-beta.txt"
 local isTeleporting = false
 local attemptsOnSameServer = 0
 local MAX_SAME_SERVER_ATTEMPTS = 1 -- Ile razy probowac wejsc na ten sam serwer przed zmiana?
