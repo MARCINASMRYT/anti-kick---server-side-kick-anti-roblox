@@ -31,6 +31,24 @@ local isTeleporting = false
 local attemptsOnSameServer = 0
 local MAX_SAME_SERVER_ATTEMPTS = 1 -- Ile razy probowac wejsc na ten sam serwer przed zmiana?
 
+-- [[ PROFILE GIER ]] --
+-- Config danej gry uaktywnia sie AUTOMATYCZNIE tylko gdy game.PlaceId pasuje.
+-- "blockRemotes" = nazwy WYCHODZACYCH remote'ow (FireServer/InvokeServer) do zablokowania.
+-- !!! UWAGA: wpisuj tu TYLKO remote detekcji anti-cheata. Zablokowanie zlego remote'a
+--     zepsuje gre (np. strzelanie / hit-reg w PF). Domyslnie lista jest PUSTA = bezpiecznie.
+local GAME_PROFILES = {
+    -- Phantom Forces (PlaceId potwierdzony: 292439477)
+    [292439477] = {
+        name = "Phantom Forces",
+        blockRemotes = {
+            -- Wpisz nazwy remote'ow detekcji, np.:
+            -- ["AntiExploitRemote"] = true,
+            -- ["ClientReport"]      = true,
+        },
+    },
+}
+local activeProfile = GAME_PROFILES[PlaceId]
+
 -- Pomocnik: bezpieczne podlaczanie eventow (jeden zly event nie zabije calego skryptu)
 local function safeConnect(signal, callback)
     local ok, conn = pcall(function()
@@ -215,11 +233,26 @@ do
         local oldNamecall
         local handler = function(self, ...)
             local method = getnamecallmethod()
+
+            -- a) Anti-Kick: blokada lokalnego Player:Kick()
             if method == "Kick" and self == LocalPlayer and not checkcaller() then
                 print("[Anti-Kick] Przechwycono lokalny Kick! Ewakuacja.")
                 task.spawn(executeEvacuation)
                 return nil
             end
+
+            -- b) Profil gry: blokada WYCHODZACYCH remote'ow detekcji (np. anti-cheat w PF)
+            if activeProfile and not checkcaller()
+                and (method == "FireServer" or method == "InvokeServer") then
+                local rname
+                pcall(function() rname = self.Name end)
+                if rname and activeProfile.blockRemotes[rname] then
+                    print("[Profil:" .. activeProfile.name .. "] Zablokowano remote: " .. rname)
+                    notify(activeProfile.name, "Zablokowano remote: " .. rname, 3)
+                    return -- nie wysylamy do serwera (dla InvokeServer zwraca nil)
+                end
+            end
+
             return oldNamecall(self, ...)
         end
 
@@ -247,3 +280,15 @@ end
 
 print("[OK] Modul Anti-Kick + Smart Server Hop aktywowany.")
 notify("Anti-Kick", "Skrypt aktywny i chroni Cie! ✓", 5)
+
+-- Powiadomienie o wykrytym profilu gry (jesli pasuje)
+if activeProfile then
+    local count = 0
+    for _ in pairs(activeProfile.blockRemotes) do count = count + 1 end
+    print("[Profil] Wykryto: " .. activeProfile.name .. " | remote'ow na liscie: " .. count)
+    if count > 0 then
+        notify(activeProfile.name, "Profil aktywny - blokuje " .. count .. " remote(ow)", 5)
+    else
+        notify(activeProfile.name, "Profil wykryty (lista remote pusta)", 5)
+    end
+end
