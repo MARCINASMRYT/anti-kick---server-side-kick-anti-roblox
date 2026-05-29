@@ -1,0 +1,136 @@
+-- [[ ZAAWANSOWANY SYSTEM ANTI-KICK & SMART SERVER HOP ]] --
+if not game:IsLoaded() then game.Loaded:Wait() end
+
+local Players = game:GetService("Players")
+local TeleportService = game:GetService("TeleportService")
+local HttpService = game:GetService("HttpService")
+local GuiService = game:GetService("GuiService")
+local NetworkClient = game:GetService("NetworkClient")
+local CoreGui = game:GetService("CoreGui")
+
+local LocalPlayer = Players.LocalPlayer
+local PlaceId = game.PlaceId
+local CurrentJobId = game.JobId
+
+-- Ustawienia
+local isTeleporting = false
+local attemptsOnSameServer = 0
+local MAX_SAME_SERVER_ATTEMPTS = 1 -- Ile razy ma próbować wejść na ten sam serwer przed zmianą?
+
+-- [[ FUNKCJA SZUKANIA NOWEGO SERWERA (SERVER HOP) ]]
+local function ServerHop()
+    print("[Smart Hop] Szukam zupełnie nowego serwera...")
+    
+    -- Wykrywanie uniwersalnej funkcji HTTP executora
+    local httprequest = (syn and syn.request) or (http and http.request) or http_request or (fluxus and fluxus.request) or request
+    
+    if httprequest then
+        -- Pobieramy listę serwerów z API Robloxa
+        local api_url = "https://games.roblox.com/v1/games/" .. PlaceId .. "/servers/Public?sortOrder=Desc&limit=100"
+        local success, result = pcall(function()
+            return httprequest({
+                Url = api_url,
+                Method = "GET"
+            })
+        end)
+
+        if success and result.StatusCode == 200 then
+            local decoded = HttpService:JSONDecode(result.Body)
+            local availableServers = {}
+
+            -- Filtrowanie serwerów
+            for _, server in ipairs(decoded.data) do
+                -- Ignorujemy pełne serwery oraz ten, z którego właśnie dostaliśmy kicka
+                if server.playing < server.maxPlayers and server.id ~= CurrentJobId then
+                    table.insert(availableServers, server.id)
+                end
+            end
+
+            if #availableServers > 0 then
+                -- Losujemy nowy serwer z listy, aby uniknąć wejścia na serwer znajomego itp.
+                local randomJobId = availableServers[math.random(1, #availableServers)]
+                print("[Smart Hop] Znaleziono nowy serwer! JobId: " .. randomJobId)
+                TeleportService:TeleportToPlaceInstance(PlaceId, randomJobId, LocalPlayer)
+                return
+            end
+        end
+    end
+    
+    -- FALLBACK: Jeśli executor zablokuje zapytanie HTTP, używamy czystego teleportu w ciemno
+    print("[Smart Hop] HTTP zablokowane. Wykonuję ślepy skok na inny serwer...")
+    TeleportService:Teleport(PlaceId, LocalPlayer)
+end
+
+-- [[ GŁÓWNA LOGIKA REJOINA ]]
+local function executeEvacuation()
+    if isTeleporting then return end
+    isTeleporting = true
+    
+    print("[Anti-Kick] Wykryto zagrożenie. Analiza opcji ucieczki...")
+    
+    if attemptsOnSameServer < MAX_SAME_SERVER_ATTEMPTS then
+        attemptsOnSameServer = attemptsOnSameServer + 1
+        print("[Anti-Kick] Próba " .. attemptsOnSameServer .. ": Powrót na ten sam serwer...")
+        TeleportService:TeleportToPlaceInstance(PlaceId, CurrentJobId, LocalPlayer)
+    else
+        print("[Anti-Kick] Ten sam serwer zawiódł lub jest spalony. Uruchamiam Server Hop...")
+        ServerHop()
+    end
+    
+    -- Odblokowanie blokady teleportacji po czasie (gdyby teleport się zawiesił)
+    task.delay(10, function() isTeleporting = false end)
+end
+
+-- [[ WYKRYWANIE PORAŻKI TELEPORTACJI ]]
+TeleportService.TeleportInitFailed:Connect(newcclosure(function(player, teleportResult, errorMessage)
+    print("[System] Błąd łączenia: " .. tostring(errorMessage))
+    isTeleporting = false
+    -- Jeśli wyrzuci błąd, natychmiast wymuszamy skok na INNY serwer
+    attemptsOnSameServer = 999 
+    task.wait(1)
+    executeEvacuation()
+end))
+
+-- [[ WARSTWY DETEKCJI (GŁĘBOKIE MONOTOROWANIE) ]]
+
+-- 1. Utrata połączenia sieciowego
+NetworkClient.ConnectionLost:Connect(newcclosure(function()
+    executeEvacuation()
+end))
+
+-- 2. Komunikaty GuiService
+GuiService.ErrorMessageChanged:Connect(newcclosure(function()
+    task.wait(0.1)
+    executeEvacuation()
+end))
+
+-- 3. Detekcja z ukrytego CoreGui
+task.spawn(function()
+    local promptOverlay = CoreGui:WaitForChild("RobloxPromptGui", 10)
+    if promptOverlay then
+        promptOverlay = promptOverlay:WaitForChild("promptOverlay", 10)
+        if promptOverlay then
+            promptOverlay.ChildAdded:Connect(newcclosure(function(child)
+                if child.Name == "ErrorPrompt" then executeEvacuation() end
+            end))
+        end
+    end
+end)
+
+-- 4. Hook na metatabelę (Blokowanie lokalnego Kicka i ciche przełączenie)
+local mt = getrawmetatable(game)
+local oldNamecall = mt.__namecall
+setreadonly(mt, false)
+
+mt.__namecall = newcclosure(function(self, ...)
+    local method = getnamecallmethod()
+    if tostring(method) == "Kick" and self == LocalPlayer then
+        print("[Anti-Kick] Przechwycono próbę lokalnego wyrzucenia! Wykonuję ewakuację.")
+        task.spawn(executeEvacuation)
+        return nil
+    end
+    return oldNamecall(self, ...)
+end)
+setreadonly(mt, true)
+
+print("[✓] Moduł Anti-Kick + Smart Server Hop aktywowany.")
